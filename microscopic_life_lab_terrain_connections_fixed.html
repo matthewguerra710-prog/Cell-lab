@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Microscopic Life Lab</title>
+<style>
+html,body{margin:0;background:#348fa8;font-family:system-ui,sans-serif;color:#fff}
+body{display:flex;justify-content:center;padding:14px;box-sizing:border-box}
+#app{width:min(1100px,100%)}
+.bar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;background:#173f4a;padding:10px;border-radius:12px 12px 0 0}
+button{border:1px solid #76aeba;background:#245664;color:white;border-radius:8px;padding:9px 12px;cursor:pointer}
+button.active{background:#397f91}
+#stats{margin-left:auto;font-size:12px}#zoomWrap{width:10000px;height:10000px;transform-origin:0 0}
+#view{height:680px;overflow:auto;background:#348fa8;border-radius:0 0 12px 12px}
+canvas{display:block;background:#348fa8;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.help{font-size:12px;padding:9px 2px}
+</style>
+</head>
+<body>
+<div id="app">
+<div class="bar">
+<strong>🧫 Microscopic Life Lab</strong>
+<button id="add" class="active">🫧 Add Cell</button>
+<button id="food">🍬 Food</button>
+<button id="squish">🖐️ Squish</button>
+<button id="head">🔺 Head</button><button id="bottom">🔻 Bottom</button><button id="brain">🧠 Give Brain</button><button id="bone">🦴 Bone</button><button id="boneRotOn">↻ Enable Bone Rotation</button><button id="boneRotOff">🔒 Disable Bone Rotation</button><button id="terrain">🪨 Terrain</button><button id="delTerrain">🗑️ Delete Terrain</button><button id="scale">📏 Scale</button><button id="divide">➗ Divide</button><button id="color">🎨 Color</button><button id="unconnect">🚫 Unconnectable</button><button id="connect">🔗 Connectable</button><button id="anchor">⚓ Anchor</button><button id="unanchor">⚓ Unanchor</button><button id="delCell">🗑️ Delete Cell</button>
+<button id="delBone">🗑️ Delete Bone</button><button id="pause">⏸ Pause</button>
+<button id="reset">↻ Reset</button><button id="zoomOut">− Zoom</button><button id="zoomIn">＋ Zoom</button><button id="zoomReset">100%</button>
+<span id="stats"></span>
+</div>
+<div id="view"><div id="zoomWrap"><canvas id="world" width="10000" height="10000"></canvas></div>
+<div class="help">Cells merge when they touch. The brain preserves an organism's basic shape and helps it move. The translucent green body connects touching cells. Use 🔺 Head and 🔻 Bottom to assign brain roles, then 🧠 Give Brain. Use 🪨 Terrain as solid dirt obstacles. Use 🗑️ Delete Terrain to remove them. Use 📏 Scale with the slider above a cell to resize it, ➗ Divide to split one cell into two smaller cells, 🎨 Color to choose a preset color, 🚫 Unconnectable to stop a cell from forming new connections while keeping its existing links, and 🔗 Connectable to restore a cell so it can form new connections again, and ⚓ Anchor/Unanchor to pin cells. Use 🦴 Bone to make rigid attached structures such as jaws, legs, mouths, or antennae; bones that join two cells keep a fixed length instead of acting like springs. Connector lines show the actual cell-to-cell links.</div>
+</div>
+<script>
+(()=> {
+const cv=document.getElementById("world"),ctx=cv.getContext("2d");
+const W=10000,H=10000,R=25,HIT_R=16.7,BONE_HIT_R=25,DRAG=.94,MAX=400;
+let cells=[],links=[],foods=[],brains=[],bones=[],terrains=[],
+mode="add",drag=null,boneStart=null,headCell=null,bottomCell=null,scaleCell=null,scaleDrag=false,paused=false,nextOrg=1,zoom=1;
+
+function mk(x,y,org=null){
+  const pts=[]; for(let i=0;i<24;i++)pts.push({a:i*Math.PI*2/24,s:1,v:0});
+  const c={x,y,r:R,vx:(Math.random()-.5)*.2,vy:(Math.random()-.5)*.2,
+    ph:Math.random()*7,angle:Math.random()*Math.PI*2,av:0,pts,org,color:["#245c43","#296b4d","#2f7655","#347e5b","#398761","#3f8f68","#44966d","#489b70","#4da477","#52a979","#57ae7e","#5caf82","#61b387","#66b88b","#6bbb90","#70bf94","#75c499","#7ac89d","#80cd9f","#86d1a4","#8bd6a9","#91dbad","#97dfb2","#9de4b7","#a3e8bc","#3b9368","#4aa575","#59b582","#68c08f","#77ca9c"][Math.floor(Math.random()*30)],brain:null};
+  cells.push(c); return c;
+}
+function reset(){
+  cells=[];links=[];foods=[];terrains=[];headCell=null;scaleCell=null;scaleDrag=false;bottomCell=null;brains=[];bones=[];terrains=[];nextOrg=1;
+  // Start with an empty world: the player creates every cell.
+}
+function near(x,y){
+  let best=null,bd=1e9;
+  for(const c of cells){let d=Math.hypot(c.x-x,c.y-y);if(d<c.r*1.12&&d<bd){best=c;bd=d}}
+  return best;
+}
+function nearBone(x,y){
+  let best=null,bd=1e9;
+  for(const c of cells){let d=Math.hypot(c.x-x,c.y-y);if(d<Math.max(BONE_HIT_R,c.r)&&d<bd){best=c;bd=d}}
+  return best;
+}
+function boneHit(x,y){
+  let best=null,bd=Infinity;
+  for(const b of bones){
+    const p=bonePosForCreate(b);
+    let bx,by;
+    if(b.cell){bx=b.cell.x;by=b.cell.y;}
+    else if(b.parent){const pp=bonePosForCreate(b.parent);bx=pp.ex;by=pp.ey;}
+    else {bx=b.x;by=b.y;}
+    const vx=p.ex-bx,vy=p.ey-by,len2=vx*vx+vy*vy||1;
+    const t=Math.max(0,Math.min(1,((x-bx)*vx+(y-by)*vy)/len2));
+    const px=bx+t*vx,py=by+t*vy,d=Math.hypot(x-px,y-py);
+    if(d<bd){bd=d;best=b;}
+  }
+  return bd<=Math.max(14,(best&&best.w||14)*.9)?best:null;
+}
+function linked(a,b){return links.some(l=>(l.a===a&&l.b===b)||(l.a===b&&l.b===a))}
+function group(id){return cells.filter(c=>c.org===id)}
+function join(a,b){
+  if(a===b||linked(a,b)||a.unconnectable||b.unconnectable)return;
+  let id=a.org||b.org||nextOrg++;
+  if(a.org&&b.org&&a.org!==b.org){
+    const old=b.org,keep=id;
+    const gb=group(old);
+    for(const c of gb)c.org=keep;
+    const brain=brains.find(x=>x.org===old)||brains.find(x=>x.org===keep);
+    if(brain)for(const c of gb)c.brain=brain;
+  }
+  a.org=id;b.org=id;
+  links.push({a,b,rest:(a.r+b.r)*.91});
+}
+function giveBrain(c){
+  let id=c.org||nextOrg++;
+  c.org=id;
+  const g=group(id);
+  let old=brains.find(b=>b.org===id);
+  if(!old){
+    const cx=g.reduce((sum,z)=>sum+z.x,0)/g.length;
+    const cy=g.reduce((sum,z)=>sum+z.y,0)/g.length;
+    old={org:id,shape:g.map(z=>({dx:z.x-cx,dy:z.y-cy})),cx,cy,
+      head:(headCell&&headCell.org===id)?headCell:g[0],
+      baseAngle:Math.atan2(((headCell&&headCell.org===id)?headCell:g[0]).y-((bottomCell&&bottomCell.org===id)?bottomCell:g[g.length-1]).y,((headCell&&headCell.org===id)?headCell:g[0]).x-((bottomCell&&bottomCell.org===id)?bottomCell:g[g.length-1]).x),
+      bottom:(bottomCell&&bottomCell.org===id)?bottomCell:g[g.length-1]};
+    brains.push(old);
+  }else{
+    if(headCell&&headCell.org===id)old.head=headCell;
+    if(bottomCell&&bottomCell.org===id)old.bottom=bottomCell;
+  }
+  if(!old.head||old.head.org!==id)old.head=g[0];
+  if(!old.bottom||old.bottom.org!==id)old.bottom=g[g.length-1];
+  for(const z of g)z.brain=old;
+}
+function setMode(m){
+  mode=m;
+  document.querySelectorAll("button").forEach(b=>b.classList.remove("active"));
+  const b=document.getElementById(m);if(b)b.classList.add("active");
+}
+document.getElementById("add").onclick=()=>setMode("add");
+document.getElementById("food").onclick=()=>setMode("food");
+document.getElementById("squish").onclick=()=>setMode("squish");
+document.getElementById("head").onclick=()=>setMode("head");
+document.getElementById("bottom").onclick=()=>setMode("bottom");
+document.getElementById("brain").onclick=()=>setMode("brain");
+document.getElementById("bone").onclick=()=>setMode("bone");
+document.getElementById("terrain").onclick=()=>setMode("terrain");
+document.getElementById("delTerrain").onclick=()=>setMode("delTerrain");
+document.getElementById("scale").onclick=()=>setMode("scale");
+document.getElementById("divide").onclick=()=>setMode("divide");
+document.getElementById("color").onclick=()=>setMode("color");
+document.getElementById("unconnect").onclick=()=>setMode("unconnect");
+document.getElementById("connect").onclick=()=>setMode("connect");
+document.getElementById("boneRotOn").onclick=()=>setMode("boneRotOn");
+document.getElementById("boneRotOff").onclick=()=>setMode("boneRotOff");
+document.getElementById("anchor").onclick=()=>setMode("anchor");
+document.getElementById("unanchor").onclick=()=>setMode("unanchor");
+
+function addTerrain(x,y){
+  terrains.push({x,y,r:42,rot:Math.random()*Math.PI*2});
+}
+function deleteTerrain(x,y){
+  let best=-1,bd=Infinity;
+  for(let i=0;i<terrains.length;i++){
+    const t=terrains[i],d=Math.hypot(x-t.x,y-t.y);
+    if(d<bd){bd=d;best=i;}
+  }
+  if(best>=0&&bd<terrains[best].r*1.25)terrains.splice(best,1);
+}
+function divideCell(c){
+  if(!c)return;
+  const oldLinks=links.filter(l=>l.a===c||l.b===c);
+  const a=c.angle||0, nr=Math.max(7,c.r*2/3), sep=nr*2.15;
+  const c1=mk(c.x-Math.cos(a)*sep*.5,c.y-Math.sin(a)*sep*.5,c.org);
+  const c2=mk(c.x+Math.cos(a)*sep*.5,c.y+Math.sin(a)*sep*.5,c.org);
+  c1.r=nr;c2.r=nr;c1.color=c.color;c2.color=c.color;
+  c1.angle=c.angle;c2.angle=c.angle;
+  c1.anchored=!!c.anchored;c2.anchored=!!c.anchored;c1.unconnectable=!!c.unconnectable;c2.unconnectable=!!c.unconnectable;
+  for(const l of oldLinks){
+    const other=l.a===c?l.b:l.a;
+    links=links.filter(x=>x!==l);
+    const target1=Math.hypot(other.x-c1.x,other.y-c1.y)<Math.hypot(other.x-c2.x,other.y-c2.y)?c1:c2;
+    join(target1,other);
+  }
+  if(headCell===c)headCell=c1;
+  if(bottomCell===c)bottomCell=c2;
+  for(const b of brains){
+    if(b.head===c)b.head=c1;
+    if(b.bottom===c)b.bottom=c2;
+  }
+  cells=cells.filter(x=>x!==c);
+}
+
+document.getElementById("delCell").onclick=()=>setMode("delCell");
+document.getElementById("delBone").onclick=()=>setMode("delBone");
+document.getElementById("reset").onclick=()=>reset();
+function setZoom(z){
+  zoom=Math.max(.25,Math.min(2.5,z));
+  const wrap=document.getElementById("zoomWrap");
+  wrap.style.transform=`scale(${zoom})`;
+  wrap.style.width=(W*zoom)+"px";
+  wrap.style.height=(H*zoom)+"px";
+  document.getElementById("zoomReset").textContent=Math.round(zoom*100)+"%";
+}
+document.getElementById("zoomIn").onclick=()=>setZoom(zoom*1.25);
+document.getElementById("zoomOut").onclick=()=>setZoom(zoom/1.25);
+document.getElementById("zoomReset").onclick=()=>setZoom(1);
+document.getElementById("view").addEventListener("wheel",e=>{
+  if(e.ctrlKey||e.shiftKey){
+    e.preventDefault();
+    setZoom(zoom*(e.deltaY<0?1.1:.9));
+  }
+},{passive:false});
+
+document.getElementById("pause").onclick=()=>{
+  paused=!paused;document.getElementById("pause").textContent=paused?"▶ Resume":"⏸ Pause";
+};
+function pos(e){
+  const q=cv.getBoundingClientRect();
+  return{x:(e.clientX-q.left)*W/q.width,y:(e.clientY-q.top)*H/q.height};
+}
+cv.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  const q=pos(e);
+  if(mode==="add"){if(cells.length<MAX)mk(q.x,q.y);return}
+  if(mode==="food"){for(let i=0;i<14;i++)foods.push({x:q.x+(Math.random()-.5)*70,y:q.y+(Math.random()-.5)*70,r:4,vx:0,vy:0});return}
+  if(mode==="head"){const c=near(q.x,q.y);if(c){headCell=c;}return}
+  if(mode==="bottom"){const c=near(q.x,q.y);if(c){bottomCell=c;}return}
+  if(mode==="terrain"){addTerrain(q.x,q.y);return}
+  if(mode==="delTerrain"){deleteTerrain(q.x,q.y);return}
+  const c=near(q.x,q.y);
+  const boneC=(mode==="bone")?nearBone(q.x,q.y):c;
+  if(mode==="scale"){
+    if(scaleCell){
+      const barW=180, bx=scaleCell.x-barW/2, by=scaleCell.y-scaleCell.r-24;
+      if(q.x>=bx&&q.x<=bx+barW&&q.y>=by-10&&q.y<=by+10){scaleDrag=true;return;}
+    }
+    if(c)scaleCell=c;
+    return;
+  }
+  if(mode==="divide"){if(c)divideCell(c);return}
+  if(mode==="unconnect"){if(c)c.unconnectable=true;return}
+  if(mode==="connect"){if(c)c.unconnectable=false;return}
+  if(mode==="boneRotOn"||mode==="boneRotOff"){
+    const b=boneHit(q.x,q.y);
+    if(b){
+      b.rotationEnabled=(mode==="boneRotOn");
+      if(!b.rotationEnabled && b.cell && b.endCell){
+        b.lockDx=b.endCell.x-b.cell.x;b.lockDy=b.endCell.y-b.cell.y;
+        b.len=Math.hypot(b.lockDx,b.lockDy)||b.len;
+      }
+    }
+    return;
+  }
+  if(mode==="anchor"){if(c)c.anchored=true;return}
+  if(mode==="unanchor"){if(c)c.anchored=false;return}
+  if(mode==="color"){if(c){const v=prompt("Choose a color preset:\n1 Green\n2 Blue\n3 Purple\n4 Brown\n5 Yellow\n6 Red\n7 Cyan", "1");const colors={1:"#3f8f68",2:"#4c86c6",3:"#8b5fc7",4:"#9a6a3a",5:"#c2ad4a",6:"#c65b5b",7:"#4db9b2"};if(colors[v])c.color=colors[v];}return}
+  if(mode==="brain"){if(c)giveBrain(c);return}
+  if(mode==="delCell"){
+    if(c){
+      cells=cells.filter(x=>x!==c);
+      links=links.filter(l=>l.a!==c&&l.b!==c);
+      bones=bones.filter(b=>b.cell!==c&&b.endCell!==c);
+      brains=brains.filter(b=>b.head!==c&&b.bottom!==c);
+    }
+    return;
+  }
+  if(mode==="delBone"){
+    let best=null,bd=Infinity;
+    for(const b of bones){
+      const p=bonePosForCreate(b);
+      let bx,by;
+      if(b.cell){bx=b.cell.x;by=b.cell.y;}
+      else if(b.parent){const pp=bonePosForCreate(b.parent);bx=pp.ex;by=pp.ey;}
+      else {bx=b.x;by=b.y;}
+      const ex=p.ex,ey=p.ey;
+      const vx=ex-bx,vy=ey-by,len2=vx*vx+vy*vy||1;
+      const tt=Math.max(0,Math.min(1,((q.x-bx)*vx+(q.y-by)*vy)/len2));
+      const px=bx+tt*vx,py=by+tt*vy;
+      const d=Math.hypot(q.x-px,q.y-py);
+      if(d<bd){bd=d;best=b;}
+    }
+    if(best&&bd<Math.max(18,(best.w||14)*.9))bones=bones.filter(b=>b!==best);
+    return;
+  }
+  if(mode==="bone"){
+    if(boneC){
+      const c=boneC;
+      boneStart={x:c.x,y:c.y,cell:c};
+      cv.setPointerCapture(e.pointerId);
+    }else{
+      let best=null,bd=24;
+      for(const b of bones){
+        const pp=bonePosForCreate(b),bx=b.cell?b.cell.x:b.x,by=b.cell?b.cell.y:b.y;
+        const ex=pp.ex,ey=pp.ey;
+        for(const p of [[bx,by],[ex,ey]]){
+          const d=Math.hypot(q.x-p[0],q.y-p[1]);
+          if(d<bd){bd=d;best={b,p};}
+        }
+      }
+      if(best){boneStart={x:best.p[0],y:best.p[1],parent:best.b};cv.setPointerCapture(e.pointerId);}
+    }
+    return;
+  }
+  if(!c)return;
+  drag=c;cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove",e=>{
+  e.preventDefault();
+  const q=pos(e);
+  if(boneStart)return;
+  if(mode==="scale"&&scaleCell&&scaleDrag){
+    const barW=180;
+    const bx=scaleCell.x-barW/2;
+    const t=Math.max(0,Math.min(1,(q.x-bx)/barW));
+    scaleCell.r=7+t*243;
+    return;
+  }
+  if(!drag)return;
+  const dx=q.x-drag.x,dy=q.y-drag.y;
+  drag.vx=dx*.16;drag.vy=dy*.16;drag.x=q.x;drag.y=q.y;
+  if(mode==="squish")for(const z of drag.pts)z.v+=Math.sin(z.a)*.12;
+  for(const z of cells)if(z!==drag&&Math.hypot(z.x-drag.x,z.y-drag.y)<HIT_R*2+9)join(drag,z);
+});
+function finishBone(e){
+  if(!boneStart)return;
+  const q=pos(e),dx=q.x-boneStart.x,dy=q.y-boneStart.y,len=Math.hypot(dx,dy);
+  if(len>18){
+    if(boneStart.cell){
+      const c=boneStart.cell;
+      const end=nearBone(q.x,q.y);
+      if(end&&end!==c){
+        const ex=end.x-c.x,ey=end.y-c.y,elen=Math.hypot(ex,ey)||len;
+        c.rigidRotation=true; end.rigidRotation=true;
+        bones.push({rigid:true,rotationEnabled:false,cell:c,endCell:end,parent:null,len:elen,lockDx:ex,lockDy:ey,localAngle:Math.atan2(ey,ex)-(c.angle||0),
+          w:Math.max(10,Math.min(22,elen*.16)),joint:Math.max(7,Math.min(14,elen*.09))});
+      }else{
+        c.rigidRotation=true;
+        bones.push({rigid:true,rotationEnabled:false,cell:c,parent:null,len,lockAngle:Math.atan2(dy,dx),localAngle:Math.atan2(dy,dx)-(c.angle||0),
+          w:Math.max(10,Math.min(22,len*.16)),joint:Math.max(7,Math.min(14,len*.09))});
+      }
+    }else if(boneStart.parent){
+      const p=boneStart.parent,pp=bonePosForCreate(p);
+      if(p.cell)p.cell.rigidRotation=true;
+      if(p.endCell)p.endCell.rigidRotation=true;
+      bones.push({rigid:true,rotationEnabled:false,cell:null,parent:p,len,childAngle:Math.atan2(dy,dx),
+        w:Math.max(10,Math.min(22,len*.16)),joint:Math.max(7,Math.min(14,len*.09))});
+    }
+  }
+  boneStart=null;drag=null;
+}
+function bonePosForCreate(b){
+  if(b.cell){
+    if(b.endCell)return {ex:b.endCell.x,ey:b.endCell.y};
+    const a=(b.cell.angle||0)+(b.localAngle||0);
+    return {ex:b.cell.x+Math.cos(a)*b.len,ey:b.cell.y+Math.sin(a)*b.len};
+  }
+  if(b.parent){
+    const p=bonePosForCreate(b.parent),a=b.childAngle||0;
+    return {ex:p.ex+Math.cos(a)*b.len,ey:p.ey+Math.sin(a)*b.len};
+  }
+  return {ex:b.ex,ey:b.ey};
+}
+cv.addEventListener("pointerup",e=>{
+  e.preventDefault();
+  if(boneStart){finishBone(e);return;}
+  if(scaleDrag){scaleDrag=false;return;}
+  drag=null;
+});
+cv.addEventListener("pointercancel",e=>{e.preventDefault();boneStart=null;drag=null;});
+
+// Mobile touch fallback: some mobile browsers expose touch events without
+// reliably forwarding them as pointer events. Reuse the pointer handlers by
+// dispatching synthetic pointer events from touch input.
+cv.addEventListener("touchstart",e=>{
+  e.preventDefault();
+  const t=e.changedTouches[0];
+  if(!t)return;
+  cv.dispatchEvent(new PointerEvent("pointerdown",{bubbles:true,cancelable:true,
+    clientX:t.clientX,clientY:t.clientY,pointerId:1000+t.identifier,pointerType:"touch"}));
+},{passive:false});
+cv.addEventListener("touchmove",e=>{
+  e.preventDefault();
+  const t=e.changedTouches[0];
+  if(!t)return;
+  cv.dispatchEvent(new PointerEvent("pointermove",{bubbles:true,cancelable:true,
+    clientX:t.clientX,clientY:t.clientY,pointerId:1000+t.identifier,pointerType:"touch"}));
+},{passive:false});
+cv.addEventListener("touchend",e=>{
+  e.preventDefault();
+  const t=e.changedTouches[0];
+  if(!t)return;
+  cv.dispatchEvent(new PointerEvent("pointerup",{bubbles:true,cancelable:true,
+    clientX:t.clientX,clientY:t.clientY,pointerId:1000+t.identifier,pointerType:"touch"}));
+},{passive:false});
+cv.addEventListener("touchcancel",e=>{
+  e.preventDefault();
+  boneStart=null;drag=null;scaleDrag=false;
+},{passive:false});
+
+function update(){
+  for(const c of cells){
+    c.ph+=.025;c.vx*=DRAG;c.vy*=DRAG;
+    if(c.rigidRotation){c.av=0;}else{c.av*=.90;c.angle+=c.av;}
+    if(drag!==c&&!c.anchored){c.x+=c.vx;c.y+=c.vy}
+    c.x=Math.max(c.r,Math.min(W-c.r,c.x));c.y=Math.max(c.r,Math.min(H-c.r,c.y));
+    for(const q of c.pts){
+      q.v*=.78;q.s+=(1-q.s)*.055+q.v*.025;q.s=Math.max(.82,Math.min(1.18,q.s));
+    }
+  }
+  // Terrain is a solid obstacle. Cells are pushed back out of each
+  // dirt hex and lose a little velocity on impact.
+  for(const c of cells){
+    for(const t of terrains){
+      const dx=c.x-t.x,dy=c.y-t.y,d=Math.hypot(dx,dy)||1;
+      const minD=t.r+c.r-3;
+      if(d<minD){
+        const nx=dx/d,ny=dy/d;
+        const push=minD-d;
+        if(!c.anchored){c.x+=nx*push;c.y+=ny*push;}
+        const vn=c.vx*nx+c.vy*ny;
+        if(vn<0){c.vx-=nx*vn*.72;c.vy-=ny*vn*.72;}
+      }
+    }
+  }
+  // Hard rigid-bone constraints. A bone is not a spring: its length AND
+  // its original world-space direction are locked. This prevents a jaw or
+  // frame from twisting when the cells are pushed by collisions.
+  for(let pass=0;pass<3;pass++){
+    for(const b of bones){
+      if(!b.cell||!b.endCell)continue;
+      const a=b.cell,c=b.endCell;
+      const aa=!!a.anchored,cc=!!c.anchored;
+      if(b.rotationEnabled){
+        // Hinge mode: preserve length, but allow the endpoint cell to swing around the root.
+        const dx=c.x-a.x,dy=c.y-a.y,d=Math.hypot(dx,dy)||1;
+        const tx=dx/d*b.len,ty=dy/d*b.len;
+        if(!aa&&!cc){
+          c.x=a.x+tx;c.y=a.y+ty;
+        }else if(aa&&!cc){
+          c.x=a.x+tx;c.y=a.y+ty;
+        }else if(!aa&&cc){
+          const nx=c.x,ny=c.y;
+          const dd=Math.hypot(nx-a.x,ny-a.y)||1;
+          a.x=c.x-(nx-a.x)/dd*b.len;a.y=c.y-(ny-a.y)/dd*b.len;
+        }
+      }else{
+        const tx=b.lockDx,ty=b.lockDy;
+      if(!aa&&!cc){
+        const mx=(a.x+c.x)*.5,my=(a.y+c.y)*.5;
+        c.x=mx+tx*.5;c.y=my+ty*.5;
+        a.x=mx-tx*.5;a.y=my-ty*.5;
+      }else if(aa&&!cc){
+        c.x=a.x+tx;c.y=a.y+ty;
+      }else if(!aa&&cc){
+        a.x=c.x-tx;a.y=c.y-ty;
+      }
+      }
+    }
+  }
+
+  for(let i=0;i<cells.length;i++)for(let j=i+1;j<cells.length;j++){
+    const a=cells[i],b=cells[j],dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||1;
+    const hitA=a.r*.86,hitB=b.r*.86;
+    if(d<hitA+hitB){
+      const nx=dx/d,ny=dy/d,push=(hitA+hitB-d)/2;
+      if(!a.anchored&&!b.anchored){a.x-=nx*push;a.y-=ny*push;b.x+=nx*push;b.y+=ny*push;}
+      else if(a.anchored&&!b.anchored){b.x+=nx*push*2;b.y+=ny*push*2;}
+      else if(!a.anchored&&b.anchored){a.x-=nx*push*2;a.y-=ny*push*2;}
+      // Off-center collision impulse creates actual cell rotation.
+      const tangent=(-ny*a.vx+nx*a.vy)-(-ny*b.vx+nx*b.vy);
+      if(!a.rigidRotation)a.av+=tangent*.0012;
+      if(!b.rigidRotation)b.av-=tangent*.0012;
+      const rv=(b.vx-a.vx)*nx+(b.vy-a.vy)*ny;
+      if(rv<0){a.vx+=nx*rv*.2;a.vy+=ny*rv*.2;b.vx-=nx*rv*.2;b.vy-=ny*rv*.2}
+      if(a.org!==b.org || !a.org)join(a,b);
+    }
+  }
+  for(const l of links){
+    const a=l.a,b=l.b,dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy)||1;
+    const nx=dx/d,ny=dy/d,err=d-l.rest,f=err*.0022;
+    a.vx+=nx*f;a.vy+=ny*f;b.vx-=nx*f;b.vy-=ny*f;
+  }
+  for(const b of brains){
+    const g=group(b.org);if(!g.length)continue;
+    const cx=g.reduce((s,z)=>s+z.x,0)/g.length,cy=g.reduce((s,z)=>s+z.y,0)/g.length;
+
+    // Keep the creature's body together.
+    const heading=Math.atan2(b.dirY||.15,b.dirX||1);
+    const rot=heading-(b.baseAngle||0);
+    const cs=Math.cos(rot),sn=Math.sin(rot);
+    for(let i=0;i<g.length&&i<b.shape.length;i++){
+      const t=b.shape[i],z=g[i];
+      const dx=t.dx*cs-t.dy*sn,dy=t.dx*sn+t.dy*cs;
+      const strength=(z===b.head)?0.00065:0.00085;
+      z.vx+=(cx+dx-z.x)*strength;
+      z.vy+=(cy+dy-z.y)*strength;
+    }
+
+    // Simple persistent "brain": choose a direction and steer toward it.
+    // This avoids the old rapid left/right oscillation that made creatures
+    // vibrate in place.
+    if(b.dirX===undefined){
+      b.dirX=1;b.dirY=.15;b.think=90;b.target=null;
+    }
+    b.think--;
+
+    // Look for nearby food and pursue it.
+    let nearest=null,nd=Infinity;
+    for(const f of foods){
+      const d=Math.hypot(f.x-cx,f.y-cy);
+      if(d<nd){nd=d;nearest=f}
+    }
+
+    if(nearest && nd<900){
+      const dx=nearest.x-cx,dy=nearest.y-cy,d=Math.hypot(dx,dy)||1;
+      const tx=dx/d,ty=dy/d;
+      // Smooth steering instead of snapping direction.
+      b.dirX += (tx-b.dirX)*.035;
+      b.dirY += (ty-b.dirY)*.035;
+      b.target=nearest;
+    } else {
+      // Slow wandering: direction changes over time, not every frame.
+      if(b.think<=0){
+        b.think=120+Math.random()*180;
+        const a=Math.atan2(b.dirY,b.dirX)+(Math.random()-.5)*.8;
+        b.dirX=Math.cos(a);b.dirY=Math.sin(a);
+      }
+    }
+
+    const dl=Math.hypot(b.dirX,b.dirY)||1;
+    b.dirX/=dl;b.dirY/=dl;
+
+    // Head-led propulsion: the selected head cell supplies most of the drive.
+    // The selected bottom follows with a tiny delay, while the rest of the body
+    // is carried along by the links.
+    const head=(b.head&&g.includes(b.head))?b.head:g[0];
+    const bottom=(b.bottom&&g.includes(b.bottom))?b.bottom:g[g.length-1];
+    b.head=head;b.bottom=bottom;
+    for(const z of g){
+      let targetSpeed=2.55,accel=.009;
+      if(z===head){targetSpeed=3.05;accel=.045;}
+      else if(z===bottom){targetSpeed=2.40;accel=.007;}
+      const desiredX=b.dirX*targetSpeed,desiredY=b.dirY*targetSpeed;
+      z.vx+=(desiredX-z.vx)*accel;
+      z.vy+=(desiredY-z.vy)*accel;
+    }
+
+    // Soft world-edge steering so the brain doesn't get stuck against walls.
+    const margin=180,turn=.035;
+    if(cx<margin)b.dirX+=turn;
+    if(cx>W-margin)b.dirX-=turn;
+    if(cy<margin)b.dirY+=turn;
+    if(cy>H-margin)b.dirY-=turn;
+  }
+}
+function hull(ps){
+  if(ps.length<3)return ps;
+  ps=ps.slice().sort((a,b)=>a.x-b.x||a.y-b.y);
+  const cr=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x),lo=[],hi=[];
+  for(const q of ps){while(lo.length>1&&cr(lo[lo.length-2],lo[lo.length-1],q)<=0)lo.pop();lo.push(q)}
+  for(let i=ps.length-1;i>=0;i--){const q=ps[i];while(hi.length>1&&cr(hi[hi.length-2],hi[hi.length-1],q)<=0)hi.pop();hi.push(q)}
+  lo.pop();hi.pop();return lo.concat(hi);
+}
+
+function organismRotation(g,b){
+  if(g.length<2)return 0;
+  // Estimate the rigid rotation of the current body against its stored brain
+  // blueprint. This lets attached bones rotate with the whole organism.
+  if(b&&b.shape&&b.shape.length>=g.length){
+    let cx=g.reduce((a,z)=>a+z.x,0)/g.length,cy=g.reduce((a,z)=>a+z.y,0)/g.length;
+    let dot=0,cross=0;
+    for(let i=0;i<g.length;i++){
+      const t=b.shape[i],z=g[i],x=z.x-cx,y=z.y-cy;
+      dot+=t.dx*x+t.dy*y;
+      cross+=t.dx*y-t.dy*x;
+    }
+    return Math.atan2(cross,dot);
+  }
+  // Without a brain, use the organism's principal axis as a fallback.
+  let cx=g.reduce((a,z)=>a+z.x,0)/g.length,cy=g.reduce((a,z)=>a+z.y,0)/g.length;
+  let xx=0,xy=0,yy=0;
+  for(const z of g){const x=z.x-cx,y=z.y-cy;xx+=x*x;xy+=x*y;yy+=y*y;}
+  return .5*Math.atan2(2*xy,xx-yy);
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#348fa8";
+  ctx.fillRect(0,0,W,H);
+
+
+  // Dirt terrain: a brown rounded hexagon with a simple procedural dirt texture.
+  for(const t of terrains){
+    ctx.save();
+    ctx.translate(t.x,t.y);
+    ctx.rotate(t.rot);
+    ctx.beginPath();
+    for(let i=0;i<6;i++){
+      const a=i*Math.PI/3;
+      const px=Math.cos(a)*t.r,py=Math.sin(a)*t.r;
+      i?ctx.lineTo(px,py):ctx.moveTo(px,py);
+    }
+    ctx.closePath();
+    ctx.globalAlpha=.95;
+    ctx.fillStyle="#8b5a32";
+    ctx.fill();
+    ctx.save();
+    ctx.clip();
+    let seed=Math.floor(t.x*13+t.y*7);
+    for(let i=0;i<22;i++){
+      seed=(seed*1664525+1013904223)>>>0;
+      const rx=((seed/4294967296)-.5)*t.r*1.8;
+      seed=(seed*1664525+1013904223)>>>0;
+      const ry=((seed/4294967296)-.5)*t.r*1.8;
+      seed=(seed*1664525+1013904223)>>>0;
+      const rr=1.5+(seed/4294967296)*3.5;
+      ctx.globalAlpha=.22;
+      ctx.fillStyle=(i%2)?"#5e3c22":"#b57a48";
+      ctx.beginPath();ctx.arc(rx,ry,rr,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalAlpha=.65;
+    ctx.strokeStyle="#6a4528";
+    ctx.lineWidth=2;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const ids=[...new Set(cells.map(c=>c.org).filter(Boolean))];
+
+  // Smooth translucent body between connected cells.
+  // No decorative texture circles are generated anywhere.
+  for(const id of ids){
+    const g=group(id);
+    if(g.length<2)continue;
+    ctx.save();
+    ctx.globalAlpha=.32;
+    ctx.fillStyle="#63b98d";
+    for(const c of g){
+      ctx.beginPath();
+      ctx.arc(c.x,c.y,c.r+2,0,Math.PI*2);
+      ctx.fill();
+    }
+    for(const l of links){
+      if(l.a.org!==id||l.b.org!==id)continue;
+      ctx.strokeStyle="#63b98d";
+      ctx.lineWidth=Math.max(2,(Math.min(l.a.r,l.b.r)+2)*2);
+      ctx.lineCap="round";
+      ctx.beginPath();
+      ctx.moveTo(l.a.x,l.a.y);
+      ctx.lineTo(l.b.x,l.b.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Individual translucent cells.
+  for(const c of cells){
+    ctx.save();
+    ctx.globalAlpha=.68;
+    ctx.fillStyle=c.color;
+    ctx.beginPath();
+    for(let i=0;i<c.pts.length;i++){
+      const q=c.pts[i],rr=c.r*q.s,ang=q.a+(c.angle||0);
+      const px=c.x+Math.cos(ang)*rr,py=c.y+Math.sin(ang)*rr;
+      i?ctx.lineTo(px,py):ctx.moveTo(px,py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+
+  for(const c of cells){
+    if(!c.unconnectable)continue;
+    ctx.save();ctx.globalAlpha=.8;ctx.strokeStyle="#e5a5a5";ctx.lineWidth=2;
+    ctx.setLineDash([5,4]);ctx.beginPath();ctx.arc(c.x,c.y,c.r+5,0,Math.PI*2);ctx.stroke();ctx.restore();
+  }
+
+  for(const c of cells){
+    if(!c.anchored)continue;
+    ctx.save();ctx.globalAlpha=.8;ctx.strokeStyle="#d8d8d8";ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(c.x-c.r*.55,c.y+c.r*.9);ctx.lineTo(c.x+c.r*.55,c.y+c.r*.9);ctx.stroke();
+    ctx.restore();
+  }
+
+  // Interactive scale slider above the selected cell.
+  if(mode==="scale"&&scaleCell){
+    const c=scaleCell,barW=Math.max(90,Math.min(180,c.r*3.2)),barH=7;
+    const bx=c.x-barW/2,by=c.y-c.r-24;
+    ctx.save();
+    ctx.globalAlpha=.9;
+    ctx.strokeStyle="#d7f5e8";ctx.lineWidth=2;ctx.lineCap="round";
+    ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+barW,by);ctx.stroke();
+    const t=(c.r-7)/243;
+    ctx.fillStyle="#ffffff";ctx.beginPath();ctx.arc(bx+t*barW,by,7,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#173f4a";ctx.font="11px system-ui";ctx.textAlign="center";
+    ctx.fillText(Math.round(c.r)+" px",c.x,by-10);
+    ctx.restore();
+  }
+
+  // Role selection outlines: purple = head, brown = bottom.
+  for(const c of cells){
+    if(c!==headCell && c!==bottomCell)continue;
+    ctx.save();
+    ctx.globalAlpha=.95;
+    ctx.strokeStyle=(c===headCell)?"#9b59ff":"#8b5a32";
+    ctx.lineWidth=3.2;
+    ctx.beginPath();
+    for(let i=0;i<c.pts.length;i++){
+      const q=c.pts[i],rr=c.r*q.s+2.5,ang=q.a+(c.angle||0);
+      const px=c.x+Math.cos(ang)*rr,py=c.y+Math.sin(ang)*rr;
+      i?ctx.lineTo(px,py):ctx.moveTo(px,py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Very thin translucent mint connection map. Unlike the outer membrane,
+  // these lines show the actual cell-to-cell links so the player can inspect
+  // the organism's connectivity without making the body look segmented.
+  ctx.save();
+  ctx.globalAlpha=.28;
+  ctx.strokeStyle="#c9f4df";
+  ctx.lineWidth=1.35;
+  ctx.lineCap="round";
+  for(const l of links){
+    ctx.beginPath();
+    ctx.moveTo(l.a.x,l.a.y);
+    ctx.lineTo(l.b.x,l.b.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Rounded bones. Attached bones preserve the direction in which they were
+  // created, while still following the cell's rotation.
+  const bonePos=b=>{
+    if(b.cell){
+      if(b.endCell)return {bx:b.cell.x,by:b.cell.y,ex:b.cell.x+b.lockDx,ey:b.cell.y+b.lockDy};
+      const a=b.lockAngle??((b.cell.angle||0)+(b.localAngle||0));
+      return {bx:b.cell.x,by:b.cell.y,
+              ex:b.cell.x+Math.cos(a)*b.len,
+              ey:b.cell.y+Math.sin(a)*b.len};
+    }
+    if(b.parent){
+      const p=bonePos(b.parent),a=b.childAngle||0;
+      return {bx:p.ex,by:p.ey,
+              ex:p.ex+Math.cos(a)*b.len,
+              ey:p.ey+Math.sin(a)*b.len};
+    }
+    return {bx:b.x,by:b.y,ex:b.ex,ey:b.ey};
+  };
+  for(const bone of bones){
+    const p=bonePos(bone),w=bone.w||14;
+    ctx.save();
+    ctx.globalAlpha=.62;
+    ctx.strokeStyle="#c9f4df";
+    ctx.lineWidth=w;
+    ctx.lineCap="round";
+    ctx.beginPath();
+    ctx.moveTo(p.bx,p.by);
+    ctx.lineTo(p.ex,p.ey);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Thin mint outer membrane. This is a mask of the actual connected body:
+  // expand the union slightly, subtract the real union, then draw only that
+  // resulting boundary. There are no standalone circle/ring primitives here.
+  for(const id of ids){
+    const g=group(id);
+    if(g.length<2)continue;
+
+    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+    for(const c of g){
+      minX=Math.min(minX,c.x-c.r-4);
+      maxX=Math.max(maxX,c.x+c.r+4);
+      minY=Math.min(minY,c.y-c.r-4);
+      maxY=Math.max(maxY,c.y+c.r+4);
+    }
+
+    const scale=2,pad=6;
+    const ow=Math.max(8,Math.ceil((maxX-minX+pad*2)*scale));
+    const oh=Math.max(8,Math.ceil((maxY-minY+pad*2)*scale));
+    const off=document.createElement("canvas");
+    off.width=ow; off.height=oh;
+    const oc=off.getContext("2d");
+
+    const union=(extra)=>{
+      oc.fillStyle="#fff";
+      for(const c of g){
+        oc.beginPath();
+        oc.arc((c.x-minX+pad)*scale,(c.y-minY+pad)*scale,
+               (c.r+extra)*scale,0,Math.PI*2);
+        oc.fill();
+      }
+      for(const l of links){
+        if(l.a.org!==id||l.b.org!==id)continue;
+        oc.save();
+        oc.strokeStyle="#fff";
+        oc.lineWidth=(Math.min(l.a.r,l.b.r)+extra)*2*scale;
+        oc.lineCap="round";
+        oc.beginPath();
+        oc.moveTo((l.a.x-minX+pad)*scale,(l.a.y-minY+pad)*scale);
+        oc.lineTo((l.b.x-minX+pad)*scale,(l.b.y-minY+pad)*scale);
+        oc.stroke();
+        oc.restore();
+      }
+    };
+
+    union(1.6);
+    oc.globalCompositeOperation="destination-out";
+    union(0);
+    oc.globalCompositeOperation="source-over";
+
+    ctx.save();
+    ctx.globalAlpha=.34;
+    ctx.drawImage(off,minX-pad,minY-pad,ow/scale,oh/scale);
+    ctx.restore();
+  }
+
+  ctx.globalAlpha=1;
+}
+function loop(){if(!paused)update();draw();requestAnimationFrame(loop)}
+reset();loop();
+})();
+</script>
+</body>
+</html>
